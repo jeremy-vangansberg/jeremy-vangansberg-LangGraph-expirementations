@@ -70,17 +70,17 @@ class InitialMessageParse(BaseModel):
     topic: str = Field(description="Le sujet de recherche")
     max_analysts: int = Field(description="Nombre d'analystes (par défaut 3 si non spécifié)")
 
-def parse_initial_message(message: HumanMessage) -> Tuple[str, int]:
+def parse_initial_message(state: GenerateAnalystsState) -> Tuple[str, int]:
     """Parse le message initial pour extraire le topic et le nombre d'analystes"""
     
+    # Récupérer le message initial
+    initial_message = state["messages"][0]
+
     # Instructions pour le parsing
-    parse_instructions = """Extrayez le sujet de recherche et le nombre d'analystes du message suivant.
+    parse_instructions = f"""Extrayez le sujet de recherche et le nombre d'analystes du message suivant.
     Retournez un JSON avec deux champs :
     - topic: le sujet de recherche
     - max_analysts: le nombre d'analystes (par défaut 3 si non spécifié)
-    
-    Exemple d'entrée : "Je veux faire une recherche sur la sécurité de l'IA avec 2 analystes"
-    Exemple de sortie : {"topic": "sécurité de l'IA", "max_analysts": 2}
     """
     
     # Utiliser le LLM pour parser
@@ -88,48 +88,39 @@ def parse_initial_message(message: HumanMessage) -> Tuple[str, int]:
     
     # Parser le message
     result = structured_llm.invoke([
-        SystemMessage(content=parse_instructions),
-        message
+        SystemMessage(content=parse_instructions.format(initial_message=parse_instructions)),
+        HumanMessage(content=f"Voici le message : {initial_message.content}")
     ])
     
-    return result.topic, result.max_analysts
+    return {
+        "max_analysts": result.max_analysts,
+        "topic": result.topic
+    }
 
 
 def create_analysts(state: GenerateAnalystsState):
-    """Create analysts based on the initial message"""
     
-    # Récupérer le premier message
-    initial_message = state["messages"][0]
+    """ Create analysts """
     
-    # Parser le message pour obtenir topic et max_analysts
-    topic, max_analysts = parse_initial_message(initial_message)
-    human_analyst_feedback = state.get('human_analyst_feedback', '')
-    
+    topic=state['topic']
+    max_analysts=state['max_analysts']
+    human_analyst_feedback=state.get('human_analyst_feedback', '')
+        
     # Enforce structured output
     structured_llm = llm.with_structured_output(Perspectives)
 
     # System message
-    system_message = analyst_instructions.format(
-        topic=topic,
-        human_analyst_feedback=human_analyst_feedback, 
-        max_analysts=max_analysts
-    )
+    system_message = analyst_instructions.format(topic=topic,
+                                                            human_analyst_feedback=human_analyst_feedback, 
+                                                            max_analysts=max_analysts)
 
-    # Generate analysts
-    analysts = structured_llm.invoke([
-        SystemMessage(content=system_message),
-        HumanMessage(content="Générez l'ensemble des analystes.")
-    ])
+    # Generate question 
+    analysts = structured_llm.invoke([SystemMessage(content=system_message)]+[HumanMessage(content="Génère l'ensemble des analystes.")])
     
-    # Mettre à jour le state
-    return {
-        "analysts": analysts.analysts,
-        "max_analysts": max_analysts,
-        "topic": topic
-    }
+    # Write the list of analysis to state
+    return {"analysts": analysts.analysts}
 
 ### Nodes and edges
-
 analyst_instructions="""Vous êtes chargé de créer un ensemble de personnalités d'analystes IA. Suivez ces instructions attentivement :
 
 1. D'abord, examinez le sujet de recherche :
@@ -565,6 +556,7 @@ def finalize_report(state: ResearchGraphState):
 
 # Add nodes and edges 
 builder = StateGraph(ResearchGraphState)
+builder.add_node("parse_initial_message", parse_initial_message)
 builder.add_node("create_analysts", create_analysts)
 builder.add_node("human_feedback", human_feedback)
 builder.add_node("conduct_interview", interview_builder.compile())
@@ -574,7 +566,8 @@ builder.add_node("write_conclusion",write_conclusion)
 builder.add_node("finalize_report",finalize_report)
 
 # Logic
-builder.add_edge(START, "create_analysts")
+builder.add_edge(START, "parse_initial_message")
+builder.add_edge("parse_initial_message", "create_analysts")
 builder.add_edge("create_analysts", "human_feedback")
 builder.add_conditional_edges("human_feedback", initiate_all_interviews, ["create_analysts", "conduct_interview"])
 builder.add_edge("conduct_interview", "write_report")
